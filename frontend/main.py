@@ -3,7 +3,7 @@ import requests
 import hashlib
 import json
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.opengl)
 
 class GraphVisualizer:
     def __init__(self):
