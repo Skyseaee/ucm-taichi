@@ -2,6 +2,7 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
 from config import Config
+from dotenv import load_dotenv
 
 # 先创建扩展实例（但暂不初始化）
 db = SQLAlchemy()
@@ -55,3 +56,6 @@ def create_app(config_class=Config):
     except Exception as e:
         app.logger.critical(f"🔥 App creation failed: {str(e)}")
         raise
+
+load_dotenv()
+app = create_app()

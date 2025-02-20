@@ -1,3 +1,4 @@
+from colorsys import hls_to_rgb
 import taichi as ti
 import math
 import numpy as np
@@ -20,7 +21,7 @@ graph = [
 
 nodes = len(graph)
 radius = 0.4
-node_size = 8
+node_size = 12  # 增大节点尺寸
 line_width = 2
 
 # 将节点位置转换为 numpy 数组
@@ -30,7 +31,27 @@ node_positions = np.array([
     for i in range(nodes)
 ], dtype=np.float32)
 
-gui = ti.GUI("Uncertain Graph", res=(800, 800), background_color=0x000000)
+gui = ti.GUI("Uncertain Graph", res=(800, 800), background_color=0xFFFFFF)
+
+def get_edge_color(alpha):
+    # 使用HSL颜色空间实现渐变（从红色到绿色）
+    hue = (1 - alpha) * 0.3  # 控制色相范围（0.0红色 -> 0.3绿色）
+    lightness = 0.4  # 控制明度
+    saturation = 0.9  # 控制饱和度
+    
+    # 转换HSL到RGB
+    r, g, b = hls_to_rgb(hue, lightness, saturation)
+    
+    # 转换为0-255整数值
+    r = int(r * 255)
+    g = int(g * 255)
+    b = int(b * 255)
+    
+    # 保持透明度与概率相关
+    a = int(alpha * 255)
+    
+    # 组合成Taichi颜色格式（0xRRGGBBAA）
+    return (r << 24) | (g << 16) | (b << 8) | a
 
 # 预计算所有边数据
 edges = []
@@ -46,9 +67,9 @@ for i in range(nodes):
 while gui.running:
     gui.clear()
     
-    # 批量绘制边（使用RGBA十六进制格式）
+    # 绘制边
     for edge in edges:
-        color = 0xFFFFFF + (int(edge["alpha"] * 255) << 24)
+        color = get_edge_color(edge["alpha"])
         gui.line(
             edge["start"], 
             edge["end"],
@@ -56,7 +77,16 @@ while gui.running:
             radius=line_width
         )
     
-    # 绘制节点（使用预计算的位置）
-    gui.circles(node_positions, color=0xFFA500, radius=node_size)
+    # 绘制节点
+    gui.circles(node_positions, color=0xCC6600, radius=node_size)
+    
+    # 添加节点索引号
+    for i, pos in enumerate(node_positions):
+        gui.text(
+            content=f"{i+1}",                # 显示索引数字
+            pos=pos - np.array([0.02, 0]), # 微调文字位置（向右偏移）
+            font_size=20,                  # 字体大小
+            color=0x333                 # 白色文字
+        )
     
     gui.show()
