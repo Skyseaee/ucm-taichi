@@ -1,16 +1,57 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_login import login_required, current_user
 from app.models import Graph, QueryCache, db
-from app.tasks import async_k_eta_core
 import hashlib
 import json
 import time
+import uuid
+import threading
 
 query_bp = Blueprint('query', __name__)
+
+# 存储任务状态和结果的全局字典
+tasks = {}
+tasks_lock = threading.Lock()
 
 def generate_cache_key(params):
     param_str = json.dumps(params, sort_keys=True)
     return hashlib.md5(param_str.encode()).hexdigest()
+
+def background_task(task_id, edges, k, eta, graph_id):
+    """后台任务处理函数"""
+    try:
+        # 执行核心计算（假设 async_k_eta_core 是同步函数）
+        result = async_k_eta_core(edges, k, eta)
+        
+        # 生成缓存键
+        cache_key = generate_cache_key({
+            'k': k,
+            'eta': eta,
+            'graph_id': graph_id
+        })
+
+        # 在应用上下文中操作数据库
+        with current_app.app_context():
+            # 检查缓存是否存在
+            if not QueryCache.query.get(cache_key):
+                new_cache = QueryCache(
+                    id=cache_key,
+                    result=json.dumps(result),
+                    timestamp=int(time.time())
+                )
+                db.session.add(new_cache)
+                db.session.commit()
+
+        # 更新任务状态
+        with tasks_lock:
+            tasks[task_id]['status'] = 'SUCCESS'
+            tasks[task_id]['result'] = result
+
+    except Exception as e:
+        # 更新任务异常状态
+        with tasks_lock:
+            tasks[task_id]['status'] = 'FAILED'
+            tasks[task_id]['error'] = str(e)
 
 @query_bp.route('/submit', methods=['POST'])
 @login_required
@@ -23,7 +64,7 @@ def submit_query():
     except (KeyError, ValueError):
         return jsonify({'error': 'Invalid parameters'}), 400
 
-    # 获取图数据
+    # 验证图数据权限
     graph = Graph.query.get(graph_id)
     if not graph or graph.user_id != current_user.id:
         return jsonify({'error': 'Graph not found or unauthorized'}), 404
@@ -32,8 +73,10 @@ def submit_query():
     edges = []
     if graph.data:
         for line in graph.data.split('\n'):
-            u, v, p = line.strip().split(',')
-            edges.append((u, v, float(p)))
+            parts = line.strip().split(',')
+            if len(parts) == 3:
+                u, v, p = parts
+                edges.append((u, v, float(p)))
 
     # 检查缓存
     cache_key = generate_cache_key({
@@ -50,10 +93,28 @@ def submit_query():
             'status': 'COMPLETED'
         })
 
-    # 提交异步任务
-    task = async_k_eta_core.apply_async(args=(edges, k, eta))
+    # 生成唯一任务ID
+    task_id = str(uuid.uuid4())
+
+    # 记录初始任务状态
+    with tasks_lock:
+        tasks[task_id] = {
+            'status': 'PENDING',
+            'graph_id': graph_id,
+            'k': k,
+            'eta': eta,
+            'edges': edges
+        }
+
+    # 启动后台线程
+    thread = threading.Thread(
+        target=background_task,
+        args=(task_id, edges, k, eta, graph_id)
+    )
+    thread.start()
+
     return jsonify({
-        'task_id': task.id,
+        'task_id': task_id,
         'status': 'PENDING'
     }), 202
 
@@ -63,37 +124,31 @@ def get_result(task_id):
     if task_id == 'cached':
         return jsonify({'error': 'Invalid task ID'}), 400
 
-    task = async_k_eta_core.AsyncResult(task_id)
-    
-    if task.state == 'PENDING':
-        return jsonify({
-            'status': 'PENDING',
-            'message': 'Task is queued'
-        })
-    elif task.state == 'SUCCESS':
-        # 缓存结果
-        result = task.result
-        cache_key = generate_cache_key({
-            'k': task.args[0],
-            'eta': task.args[1],
-            'graph_id': request.args.get('graph_id')
-        })
-        
-        if not QueryCache.query.get(cache_key):
-            new_cache = QueryCache(
-                id=cache_key,
-                result=json.dumps(result),
-                timestamp=time.time()
-            )
-            db.session.add(new_cache)
-            db.session.commit()
-        
+    # 获取任务信息
+    with tasks_lock:
+        task_info = tasks.get(task_id)
+
+    if not task_info:
+        return jsonify({'error': 'Task not found'}), 404
+
+    # 验证图数据权限
+    graph = Graph.query.get(task_info['graph_id'])
+    if not graph or graph.user_id != current_user.id:
+        return jsonify({'error': 'Unauthorized'}), 403
+
+    # 返回不同状态的结果
+    if task_info['status'] == 'SUCCESS':
         return jsonify({
             'status': 'COMPLETED',
-            'result': result
+            'result': task_info['result']
         })
-    else:
+    elif task_info['status'] == 'FAILED':
         return jsonify({
             'status': 'FAILED',
-            'error': str(task.info)
+            'error': task_info.get('error', 'Unknown error')
         }), 500
+    else:
+        return jsonify({
+            'status': 'PENDING',
+            'message': 'Task is processing'
+        })

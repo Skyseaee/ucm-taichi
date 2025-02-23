@@ -1,3 +1,5 @@
 ucm/
 instance/
 file/
+
+__pycache__/
